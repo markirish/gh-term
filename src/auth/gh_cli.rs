@@ -74,10 +74,10 @@ impl GhCliAuthBootstrap {
     }
 
     fn find_active_account(
-        &self,
-        status: &GhAuthStatusResponse,
+    &self,
+    status: &GhAuthStatusResponse,
     ) -> Result<(String, bool), AuthError> {
-        let host = status
+        let accounts = status
             .hosts
             .get(&self.host)
             .ok_or_else(|| AuthError::NotAuthenticated {
@@ -85,7 +85,7 @@ impl GhCliAuthBootstrap {
                 details: "No auth status was returned for this host.".to_string(),
             })?;
 
-        let activeStatus = host
+        let active = accounts
             .iter()
             .find(|a| a.active)
             .ok_or_else(|| AuthError::NotAuthenticated {
@@ -93,7 +93,7 @@ impl GhCliAuthBootstrap {
                 details: "No active GitHub account found in gh auth status.".to_string(),
             })?;
 
-        Ok((activeStatus.login.clone(), activeStatus.state == "success"))
+        Ok((active.login.clone(), active.state == "success"))
     }
 
     fn get_token(&self) -> Result<String, AuthError> {
