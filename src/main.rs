@@ -1,143 +1,197 @@
-use std::io;
+use std::{
+    sync::mpsc,
+    time::Duration,
+};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Stylize,
-    symbols::border,
+    crossterm::{
+        event::{self, Event, KeyCode},
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    },
+    layout::{Alignment, Rect},
+    style::{Color, Style},
     text::{Line, Text},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Block, Borders, Paragraph},
     DefaultTerminal, Frame,
 };
 
-fn main() -> io::Result<()> {
-    ratatui::run(|terminal| App::default().run(terminal))
-}
+mod auth;
+use auth::{AuthBootstrap, GhCliAuthBootstrap};
 
-#[derive(Debug, Default)]
 pub struct App {
-    counter: u8,
-    exit: bool,
+    auth: AuthScreenState,
+    should_quit: bool,
 }
 
-impl App {
-    // runs the application's main loop until the user quits
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
-        }
-        Ok(())
-    }
+pub enum AuthScreenState {
+    Checking,
+    Success {
+        username: String,
+        host: String,
+        token_preview: String,
+    },
+    Error {
+        message: String,
+    },
+}
 
-    fn draw(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
-    }
+enum AuthMessage {
+    Success {
+        username: String,
+        host: String,
+        token_preview: String,
+    },
+    Error(String),
+}
 
-    fn handle_events(&mut self) -> io::Result<()> {
-        match event::read()? {
-            // it's important to check that the event is a key press event as
-            // crossterm also emits key release and repeat events on Windows.
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                self.handle_key_event(key_event)
+fn main() -> Result<(), std::io::Error> {
+    let mut terminal = init_terminal()?;
+
+    let (tx, rx) = mpsc::channel::<AuthMessage>();
+
+    std::thread::spawn(move || {
+        let auth = GhCliAuthBootstrap::new();
+
+        match auth.get_session() {
+            Ok(session) => {
+                let preview = preview_token(&session.token);
+                let _ = tx.send(AuthMessage::Success {
+                    username: session.username,
+                    host: session.host,
+                    token_preview: preview,
+                });
             }
-            _ => {}
-        };
-        Ok(())
-    }
+            Err(err) => {
+                let _ = tx.send(AuthMessage::Error(err.to_string()));
+            }
+        }
+    });
 
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Char('q') => self.exit(),
-            KeyCode::Left => self.decrement_counter(),
-            KeyCode::Right => self.increment_counter(),
-            _ => {}
+    let mut app = App {
+        auth: AuthScreenState::Checking,
+        should_quit: false,
+    };
+
+    while !app.should_quit {
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                AuthMessage::Success {
+                    username,
+                    host,
+                    token_preview,
+                } => {
+                    app.auth = AuthScreenState::Success {
+                        username,
+                        host,
+                        token_preview,
+                    };
+                }
+                AuthMessage::Error(message) => {
+                    app.auth = AuthScreenState::Error { message };
+                }
+            }
+        }
+
+        terminal.draw(|frame| draw(frame, &app))?;
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+                    _ => {}
+                }
+            }
         }
     }
 
-    fn exit(&mut self) {
-        self.exit = true;
-    }
-
-    fn increment_counter(&mut self) {
-        self.counter += 1;
-    }
-
-    fn decrement_counter(&mut self) {
-        self.counter -= 1;
-    }
+    restore_terminal()?;
+    Ok(())
 }
 
-impl Widget for &App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Line::from(" Counter App Tutorial ".bold());
-        let instructions = Line::from(vec![
-            " Decrement ".into(),
-            "<Left>".blue().bold(),
-            " Increment ".into(),
-            "<Right>".blue().bold(),
-            " Quit ".into(),
-            "<Q> ".blue().bold(),
-        ]);
-        let block = Block::bordered()
-            .title(title.centered())
-            .title_bottom(instructions.centered())
-            .border_set(border::THICK);
+fn draw(frame: &mut Frame, app: &App) {
+    let area = centered_rect(frame.area(), 60, 12);
 
-        let counter_text = Text::from(vec![Line::from(vec![
-            "Value: ".into(),
-            self.counter.to_string().yellow(),
-        ])]);
+    let (title, body, border_color) = match &app.auth {
+        AuthScreenState::Checking => (
+            "GitHub Auth",
+            Text::from(vec![
+                Line::from(""),
+                Line::from("Getting `gh` CLI token").alignment(Alignment::Center),
+                Line::from(""),
+                Line::from("Please wait...").alignment(Alignment::Center),
+            ]),
+            Color::Yellow,
+        ),
+        AuthScreenState::Success {
+            username,
+            host,
+            token_preview,
+        } => (
+            "GitHub Auth",
+            Text::from(vec![
+                Line::from(""),
+                Line::from("Token found!").alignment(Alignment::Center),
+                Line::from(""),
+                Line::from(format!("User: {username}")).alignment(Alignment::Center),
+                Line::from(format!("Host: {host}")).alignment(Alignment::Center),
+                Line::from(format!("Token: {token_preview}")).alignment(Alignment::Center),
+                Line::from(""),
+                Line::from("Press q to quit").alignment(Alignment::Center),
+            ]),
+            Color::Green,
+        ),
+        AuthScreenState::Error { message } => (
+            "GitHub Auth",
+            Text::from(vec![
+                Line::from(""),
+                Line::from("Authentication failed").alignment(Alignment::Center),
+                Line::from(""),
+                Line::from(message.as_str()).alignment(Alignment::Center),
+                Line::from(""),
+                Line::from("Press q to quit").alignment(Alignment::Center),
+            ]),
+            Color::Red,
+        ),
+    };
 
-        Paragraph::new(counter_text)
-            .centered()
-            .block(block)
-            .render(area, buf);
-    }
+    let block = Block::default()
+        .title(Line::from(title).alignment(Alignment::Center))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let paragraph = Paragraph::new(body)
+        .block(block)
+        .alignment(Alignment::Center);
+
+    frame.render_widget(paragraph, area);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::style::Style;
+fn centered_rect(full: Rect, width: u16, height: u16) -> Rect {
+    let x = full.x + full.width.saturating_sub(width) / 2;
+    let y = full.y + full.height.saturating_sub(height) / 2;
+    Rect::new(x, y, width.min(full.width), height.min(full.height))
+}
 
-    #[test]
-    fn render() {
-        let app = App::default();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 4));
-
-        app.render(buf.area, &mut buf);
-
-        let mut expected = Buffer::with_lines(vec![
-            "┏━━━━━━━━━━━━━ Counter App Tutorial ━━━━━━━━━━━━━┓",
-            "┃                    Value: 0                    ┃",
-            "┃                                                ┃",
-            "┗━ Decrement <Left> Increment <Right> Quit <Q> ━━┛",
-        ]);
-        let title_style = Style::new().bold();
-        let counter_style = Style::new().yellow();
-        let key_style = Style::new().blue().bold();
-        expected.set_style(Rect::new(14, 0, 22, 1), title_style);
-        expected.set_style(Rect::new(28, 1, 1, 1), counter_style);
-        expected.set_style(Rect::new(13, 3, 6, 1), key_style);
-        expected.set_style(Rect::new(30, 3, 7, 1), key_style);
-        expected.set_style(Rect::new(43, 3, 4, 1), key_style);
-
-        assert_eq!(buf, expected);
+fn preview_token(token: &str) -> String {
+    if token.len() <= 8 {
+        return "********".to_string();
     }
 
-    #[test]
-    fn handle_key_event() {
-        let mut app = App::default();
-        app.handle_key_event(KeyCode::Right.into());
-        assert_eq!(app.counter, 1);
+    format!("{}...{}", &token[..4], &token[token.len() - 4..])
+}
 
-        app.handle_key_event(KeyCode::Left.into());
-        assert_eq!(app.counter, 0);
+fn init_terminal() -> Result<DefaultTerminal, std::io::Error> {
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let terminal = ratatui::init();
+    Ok(terminal)
+}
 
-        let mut app = App::default();
-        app.handle_key_event(KeyCode::Char('q').into());
-        assert!(app.exit);
-    }
+fn restore_terminal() -> Result<(), std::io::Error> {
+    disable_raw_mode()?;
+    execute!(std::io::stdout(), LeaveAlternateScreen)?;
+    ratatui::restore();
+    Ok(())
 }

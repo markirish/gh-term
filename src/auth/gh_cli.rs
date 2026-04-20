@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::collections::HashMap;
 
 use serde::Deserialize;
 
@@ -78,15 +79,13 @@ impl GhCliAuthBootstrap {
     ) -> Result<(String, bool), AuthError> {
         let host = status
             .hosts
-            .iter()
-            .find(|h| h.hostname == self.host)
+            .get(&self.host)
             .ok_or_else(|| AuthError::NotAuthenticated {
                 host: self.host.clone(),
                 details: "No auth status was returned for this host.".to_string(),
             })?;
 
-        let active = host
-            .accounts
+        let activeStatus = host
             .iter()
             .find(|a| a.active)
             .ok_or_else(|| AuthError::NotAuthenticated {
@@ -94,7 +93,7 @@ impl GhCliAuthBootstrap {
                 details: "No active GitHub account found in gh auth status.".to_string(),
             })?;
 
-        Ok((active.login.clone(), active.account_status == "valid"))
+        Ok((activeStatus.login.clone(), activeStatus.state == "success"))
     }
 
     fn get_token(&self) -> Result<String, AuthError> {
@@ -114,11 +113,11 @@ impl GhCliAuthBootstrap {
     }
 }
 
-impl Default for GhCliAuthBootstrap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// impl Default for GhCliAuthBootstrap {
+//     fn default() -> Self {
+//         Self::new()
+//     }
+// }
 
 impl AuthBootstrap for GhCliAuthBootstrap {
     fn check_auth(&self) -> Result<AuthCheckResult, AuthError> {
@@ -152,23 +151,17 @@ impl AuthBootstrap for GhCliAuthBootstrap {
 
 #[derive(Debug, Deserialize)]
 struct GhAuthStatusResponse {
-    hosts: Vec<GhHostStatus>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhHostStatus {
-    #[serde(rename = "hostname")]
-    hostname: String,
-    #[serde(default)]
-    accounts: Vec<GhAccountStatus>,
+    hosts: HashMap<String, Vec<GhAccountStatus>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GhAccountStatus {
-    #[serde(rename = "login")]
-    login: String,
-    #[serde(rename = "active")]
+    state: String,
     active: bool,
-    #[serde(rename = "accountStatus")]
-    account_status: String,
+    host: String,
+    login: String,
+    #[serde(rename = "tokenSource")]
+    token_source: String,
+    #[serde(rename = "gitProtocol")]
+    git_protocol: String,
 }

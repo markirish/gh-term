@@ -25,7 +25,7 @@ pub enum AuthError {
 }
 
 impl std::fmt::Display for AuthError {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
     match self {
       Self::GhNotInstalled => write!(f, "GitHub CLI (`gh`) is not installed or not on PATH."),
       Self::NotAuthenticated { host, details } => {
